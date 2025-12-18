@@ -1,60 +1,237 @@
-def read_data(filename):
-    data = []
-    with open(filename, 'r', encoding='utf-8') as f:
-        for line in f:
-            value = float(line.strip().split(';')[1])
-            data.append(value)
-    return data
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import io
+import sys
+from typing import List, Tuple, Optional
+from math import isfinite
+import pathlib
+
+class TimeSeriesAnalyzer:
+    """Анализатор временных рядов с сезонной декомпозицией"""
+    
+    @staticmethod
+    def load_series_from_file(path: str) -> Optional[List[float]]:
+        """Загрузка числовых данных из CSV файла"""
+        series_values = []
+        try:
+            file_path = pathlib.Path(path)
+            if not file_path.exists():
+                print(f"Файл {path} не найден")
+                return None
+                
+            with file_path.open('r', encoding='utf-8-sig') as file_obj:
+                for line_num, line_content in enumerate(file_obj, 1):
+                    line_content = line_content.rstrip('\n\r')
+                    if not line_content:
+                        continue
+                        
+                    cells = line_content.split(';')
+                    if len(cells) < 2:
+                        continue
+                        
+                    str_value = cells[1].strip()
+                    if not str_value:
+                        continue
+                        
+                    try:
+                        # Замена запятой на точку для корректного преобразования
+                        num_value = float(str_value.replace(',', '.'))
+                        if isfinite(num_value):
+                            series_values.append(num_value)
+                    except (ValueError, TypeError):
+                        continue
+                        
+            return series_values if series_values else None
+            
+        except Exception as e:
+            print(f"Ошибка чтения файла: {e}")
+            return None
+    
+    @staticmethod
+    def compute_linear_approximation(values: List[float], n_points: int) -> Tuple[float, float]:
+        """Вычисление линейной аппроксимации первых n точек"""
+        if len(values) < n_points or n_points < 2:
+            raise ValueError("Недостаточно точек для аппроксимации")
+        
+        x_sum = 0.0
+        y_sum = 0.0
+        
+        # Первый проход - вычисление сумм
+        for idx in range(n_points):
+            x_sum += idx
+            y_sum += values[idx]
+        
+        x_avg = x_sum / n_points
+        y_avg = y_sum / n_points
+        
+        # Второй проход - вычисление коэффициентов
+        numerator_acc = 0.0
+        denominator_acc = 0.0
+        
+        for idx in range(n_points):
+            x_diff = idx - x_avg
+            y_diff = values[idx] - y_avg
+            numerator_acc += x_diff * y_diff
+            denominator_acc += x_diff * x_diff
+        
+        slope = numerator_acc / denominator_acc if denominator_acc != 0 else 0.0
+        intercept = y_avg - slope * x_avg
+        
+        return intercept, slope
+    
+    @staticmethod
+    def seasonal_decomposition(
+        observations: List[float],
+        seasonal_cycle: int,
+        level_smoothing: float = 0.4,
+        trend_smoothing: float = 0.3,
+        seasonal_smoothing: float = 0.3
+    ) -> Tuple[float, float, List[float]]:
+        """Трехпараметрическое экспоненциальное сглаживание"""
+        
+        if len(observations) < 2 * seasonal_cycle:
+            raise ValueError(f"Требуется минимум {2 * seasonal_cycle} наблюдений")
+        
+        # Инициализация базовых компонент
+        base_value, growth_rate = TimeSeriesAnalyzer.compute_linear_approximation(
+            observations, seasonal_cycle
+        )
+        
+        # Инициализация сезонных компонент
+        seasonal_factors = []
+        for i in range(seasonal_cycle):
+            expected = base_value + growth_rate * i
+            seasonal_factors.append(observations[i] - expected)
+        
+        # Основной алгоритм адаптации
+        for time_idx in range(seasonal_cycle, len(observations)):
+            previous_base = base_value
+            seasonal_idx = time_idx % seasonal_cycle
+            
+            # Обновление базового уровня
+            seasonal_adjusted = observations[time_idx] - seasonal_factors[seasonal_idx]
+            base_value = level_smoothing * seasonal_adjusted + \
+                        (1 - level_smoothing) * (base_value + growth_rate)
+            
+            # Обновление тренда
+            growth_rate = trend_smoothing * (base_value - previous_base) + \
+                         (1 - trend_smoothing) * growth_rate
+            
+            # Обновление сезонного фактора
+            seasonal_factors[seasonal_idx] = seasonal_smoothing * \
+                (observations[time_idx] - base_value) + \
+                (1 - seasonal_smoothing) * seasonal_factors[seasonal_idx]
+        
+        return base_value, growth_rate, seasonal_factors
+    
+    @staticmethod
+    def generate_predictions(
+        current_level: float,
+        trend_rate: float,
+        seasonal_pattern: List[float],
+        forecast_horizon: int
+    ) -> List[float]:
+        """Генерация прогнозных значений"""
+        predictions = []
+        cycle_length = len(seasonal_pattern)
+        
+        for step in range(1, forecast_horizon + 1):
+            seasonal_index = (step - 1) % cycle_length
+            predicted_value = current_level + trend_rate * step + \
+                             seasonal_pattern[seasonal_index]
+            predictions.append(predicted_value)
+        
+        return predictions
+    
+    @classmethod
+    def execute_forecasting_pipeline(
+        cls,
+        file_path: str,
+        seasonal_period: int = 12,
+        horizon: int = 12
+    ) -> None:
+        """Полный цикл прогнозирования"""
+        
+        # Загрузка данных
+        dataset = cls.load_series_from_file(file_path)
+        if not dataset:
+            print("Данные не загружены")
+            return
+        
+        print(f"Загружено {len(dataset)} наблюдений")
+        
+        # Проверка достаточности данных
+        min_required = 2 * seasonal_period
+        if len(dataset) < min_required:
+            print(f"Недостаточно данных. Требуется: {min_required}, получено: {len(dataset)}")
+            return
+        
+        # Параметры сглаживания
+        smoothing_params = {
+            'level': 0.4,
+            'trend': 0.3,
+            'season': 0.3
+        }
+        
+        # Выполнение декомпозиции
+        try:
+            final_level, final_trend, seasonal_components = cls.seasonal_decomposition(
+                observations=dataset,
+                seasonal_cycle=seasonal_period,
+                level_smoothing=smoothing_params['level'],
+                trend_smoothing=smoothing_params['trend'],
+                seasonal_smoothing=smoothing_params['season']
+            )
+        except ValueError as e:
+            print(f"Ошибка в вычислениях: {e}")
+            return
+        
+        # Генерация прогноза
+        forecast_values = cls.generate_predictions(
+            current_level=final_level,
+            trend_rate=final_trend,
+            seasonal_pattern=seasonal_components,
+            forecast_horizon=horizon
+        )
+        
+        # Форматированный вывод результатов
+        print("\n" + "="*60)
+        print("РЕЗУЛЬТАТЫ СЕЗОННОЙ ДЕКОМПОЗИЦИИ")
+        print("="*60)
+        
+        print(f"\nБазовый уровень модели: {final_level:.6f}")
+        print(f"Среднемесячный прирост: {final_trend:.6f}")
+        
+        print("\nСезонные коэффициенты (помесячно):")
+        print("-"*40)
+        for month_idx, coeff in enumerate(seasonal_components, 1):
+            print(f"Месяц {month_idx:>2}: {coeff:>10.6f}")
+        
+        print(f"\nПрогноз на следующие {horizon} периодов:")
+        print("-"*40)
+        for idx, value in enumerate(forecast_values, 1):
+            print(f"Период {idx:>2}: {value:>10.4f}")
 
 
-def holt_winters(data, season_length, alpha1, alpha2, alpha3):
-    level = data[0]
-    trend = data[1] - data[0]
-
-    seasonals = [0] * season_length
-    for i in range(season_length):
-        seasonals[i] = data[i] - level
-
-    for t in range(len(data)):
-        if t >= season_length:
-            last_level = level
-            level = alpha1 * (data[t] - seasonals[t % season_length]) + (1 - alpha1) * (level + trend)
-            trend = alpha2 * (level - last_level) + (1 - alpha2) * trend
-            seasonals[t % season_length] = alpha3 * (data[t] - level) + (1 - alpha3) * seasonals[t % season_length]
-
-    return level, trend, seasonals
-
-
-def forecast(level, trend, seasonals, season_length, periods):
-    result = []
-    for i in range(1, periods + 1):
-        value = level + i * trend + seasonals[(i - 1) % season_length]
-        result.append(value)
-    return result
+def main():
+    """Точка входа в программу"""
+    
+    # Конфигурация анализа
+    CONFIG = {
+        'data_file': 'IMMOD.csv',
+        'seasonal_period': 12,  # месячный цикл
+        'forecast_horizon': 12  # прогноз на год
+    }
+    
+    # Создание и запуск анализатора
+    analyzer = TimeSeriesAnalyzer()
+    analyzer.execute_forecasting_pipeline(
+        file_path=CONFIG['data_file'],
+        seasonal_period=CONFIG['seasonal_period'],
+        horizon=CONFIG['forecast_horizon']
+    )
 
 
-# === ЗАГРУЗКА ДАННЫХ ===
-data = read_data("IMMOD.csv")
-
-season_length = 12  # месяцы
-
-alpha1 = 0.4
-alpha2 = 0.3
-alpha3 = 0.3
-
-level, trend, seasonals = holt_winters(data, season_length, alpha1, alpha2, alpha3)
-
-forecast_periods = 2 if len(data) >= 7 else 1
-prediction = forecast(level, trend, seasonals, season_length, forecast_periods)
-
-print("Параметры модели Хольта–Уинтерса:")
-print(f"Уровень (a): {level:.2f}")
-print(f"Тренд (b): {trend:.2f}")
-
-print("\nСезонные коэффициенты:")
-for i, s in enumerate(seasonals, 1):
-    print(f"Месяц {i}: {s:.2f}")
-
-print("\nПрогноз:")
-for i, p in enumerate(prediction, 1):
-    print(f"Прогноз на период {i}: {p:.2f}")
+if __name__ == "__main__":
+    main()
